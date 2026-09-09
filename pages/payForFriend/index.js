@@ -1,1 +1,227 @@
-// pages/payForFriend/index.js\n\nconst api = require('../../utils/api');\nconst { showLoading, hideLoading, showToast, showError, showModal } = require('../../utils/helper');\nconst { ORDER_STATUS, ERROR_TYPES, COUNTDOWN_TIME } = require('../../utils/constants');\n\nPage({\n  data: {\n    orderToken: '',           // 从URL获取的订单token\n    payDetail: {},            // 代付详情\n    loading: true,            // 是否加载中\n    error: '',                // 错误信息\n    errorDesc: '',            // 错误描述\n    paying: false,            // 是否支付中\n    countdownSeconds: COUNTDOWN_TIME, // 倒计时秒数\n    formattedCountdown: '10:00',      // 格式化的倒计时\n    orderStatus: 0,           // 订单状态\n    countdownInterval: null   // 倒计时定时器\n  },\n\n  onLoad(options) {\n    // 从URL参数获取 orderToken\n    const { orderToken } = options;\n    \n    if (!orderToken) {\n      this.handleError(ERROR_TYPES.INVALID_TOKEN, '无效的订单链接');\n      return;\n    }\n\n    this.setData({ orderToken });\n    console.log('PayForFriend Page Loaded, orderToken:', orderToken);\n\n    // 加载代付详情\n    this.onLoadPayDetail(orderToken);\n  },\n\n  /**\n   * 加载代付详情\n   * @param {string} orderToken - 订单token\n   */\n  onLoadPayDetail(orderToken) {\n    showLoading('正在加载订单信息...');\n    \n    api.getPayDetail(orderToken)\n      .then(response => {\n        hideLoading();\n        \n        // 检查订单状态\n        if (response.status === ORDER_STATUS.EXPIRED) {\n          this.handleError(ERROR_TYPES.ORDER_EXPIRED, '此代付链接已过期');\n          return;\n        }\n        \n        if (response.status === ORDER_STATUS.SUCCESS) {\n          this.handleError(ERROR_TYPES.ORDER_PAID, '订单已完成支付');\n          return;\n        }\n\n        // 设置订单信息\n        this.setData({\n          payDetail: response,\n          orderStatus: response.status,\n          loading: false,\n          error: ''\n        });\n\n        // 启动倒计时\n        this.startCountdown();\n\n        console.log('Pay detail loaded:', response);\n      })\n      .catch(error => {\n        hideLoading();\n        console.error('Failed to load pay detail:', error);\n        \n        // 根据错误类型处理\n        if (error.code === 404) {\n          this.handleError(ERROR_TYPES.ORDER_NOT_FOUND, '订单不存在或已删除');\n        } else if (error.code === 401) {\n          this.handleError(ERROR_TYPES.INVALID_TOKEN, '订单授权已失效');\n        } else {\n          this.handleError(\n            ERROR_TYPES.NETWORK_ERROR,\n            error.message || '加载订单失败，请检查网络'\n          );\n        }\n      });\n  },\n\n  /**\n   * 处理错误\n   * @param {string} errorType - 错误类型\n   * @param {string} errorDesc - 错误描述\n   */\n  handleError(errorType, errorDesc) {\n    const errorMap = {\n      [ERROR_TYPES.ORDER_EXPIRED]: '订单已过期',\n      [ERROR_TYPES.ORDER_PAID]: '订单已完成',\n      [ERROR_TYPES.ORDER_NOT_FOUND]: '订单不存在',\n      [ERROR_TYPES.PAYMENT_FAILED]: '支付失败',\n      [ERROR_TYPES.NETWORK_ERROR]: '网络错误',\n      [ERROR_TYPES.INVALID_TOKEN]: '无效订单'\n    };\n\n    this.setData({\n      loading: false,\n      error: errorMap[errorType] || '加载失败',\n      errorDesc: errorDesc,\n      orderStatus: ORDER_STATUS.EXPIRED\n    });\n  },\n\n  /**\n   * 启动倒计时\n   */\n  startCountdown() {\n    // 清除之前的倒计时\n    if (this.data.countdownInterval) {\n      clearInterval(this.data.countdownInterval);\n    }\n\n    let countdown = this.data.countdownSeconds;\n\n    const interval = setInterval(() => {\n      countdown--;\n      \n      if (countdown <= 0) {\n        clearInterval(interval);\n        this.setData({ countdownSeconds: 0 });\n        // 订单过期\n        return;\n      }\n\n      // 格式化倒计时显示\n      const formatted = this.formatCountdown(countdown);\n      this.setData({\n        countdownSeconds: countdown,\n        formattedCountdown: formatted\n      });\n    }, 1000);\n\n    this.setData({ countdownInterval: interval });\n  },\n\n  /**\n   * 格式化倒计时\n   * @param {number} seconds - 秒数\n   * @returns {string}\n   */\n  formatCountdown(seconds) {\n    const minutes = Math.floor(seconds / 60);\n    const secs = seconds % 60;\n    return `${String(minutes).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;\n  },\n\n  /**\n   * 支付按钮点击处理\n   */\n  onPaymentClick() {\n    const { countdownSeconds, orderStatus, orderToken } = this.data;\n\n    // 订单状态检查\n    if (orderStatus === ORDER_STATUS.EXPIRED) {\n      showError('订单已过期');\n      return;\n    }\n\n    if (orderStatus === ORDER_STATUS.SUCCESS) {\n      showError('订单已完成支付');\n      return;\n    }\n\n    if (countdownSeconds <= 0) {\n      showError('订单已过期，请联系发起人重新发起');\n      return;\n    }\n\n    // 获取支付签名\n    this.getPaymentSign(orderToken);\n  },\n\n  /**\n   * 获取支付签名\n   * @param {string} orderToken - 订单token\n   */\n  getPaymentSign(orderToken) {\n    this.setData({ paying: true });\n    showLoading('正在准备支付...');\n\n    api.getPaySign(orderToken)\n      .then(response => {\n        hideLoading();\n        console.log('Payment sign received:', response);\n\n        // 调起微信支付\n        this.requestPayment(response);\n      })\n      .catch(error => {\n        hideLoading();\n        this.setData({ paying: false });\n        console.error('Failed to get payment sign:', error);\n        showError(error.message || '获取支付信息失败，请重试');\n      });\n  },\n\n  /**\n   * 调起微信支付\n   * @param {object} paymentSignData - 支付签名数据\n   */\n  requestPayment(paymentSignData) {\n    const { orderToken } = this.data;\n\n    wx.requestPayment({\n      // 支付参数\n      timeStamp: paymentSignData.timeStamp,\n      nonceStr: paymentSignData.nonceStr,\n      package: paymentSignData.package,\n      signType: paymentSignData.signType,\n      paySign: paymentSignData.paySign,\n\n      // 支付成功回调\n      success: (res) => {\n        console.log('Payment success:', res);\n        this.setData({ paying: false });\n        hideLoading();\n\n        // 支付成功，调用后端回调接口\n        this.paymentCallback(orderToken, 'success');\n      },\n\n      // 支付失败回调\n      fail: (err) => {\n        console.log('Payment failed:', err);\n        this.setData({ paying: false });\n        hideLoading();\n\n        // 根据错误信息判断是用户取消还是真正的支付失败\n        if (err.errMsg && err.errMsg.includes('cancel')) {\n          showToast('您已取消支付');\n        } else {\n          showError('支付失败，请稍后重试');\n          // 调用后端回调接口记录失败\n          this.paymentCallback(orderToken, 'fail');\n        }\n      },\n\n      // 支付完成回调（无论成功失败都会调用）\n      complete: () => {\n        this.setData({ paying: false });\n      }\n    });\n  },\n\n  /**\n   * 支付完成回调 - 通知后端\n   * @param {string} orderToken - 订单token\n   * @param {string} status - 支付状态 ('success' | 'fail')\n   */\n  paymentCallback(orderToken, status) {\n    api.payCallback(orderToken, {\n      status: status,\n      timestamp: Date.now()\n    })\n      .then(response => {\n        console.log('Payment callback success:', response);\n        \n        if (status === 'success') {\n          // 跳转到支付成功页\n          this.navigateToSuccess();\n        }\n      })\n      .catch(error => {\n        console.error('Payment callback failed:', error);\n        \n        if (status === 'success') {\n          // 即使回调失败，如果支付已成功，也应该跳转\n          this.navigateToSuccess();\n        }\n      });\n  },\n\n  /**\n   * 导航到支付成功页\n   */\n  navigateToSuccess() {\n    // 延迟一下以显示成功提示\n    setTimeout(() => {\n      wx.redirectTo({\n        url: `/pages/paySuccess/index?orderToken=${this.data.orderToken}`,\n        fail: (err) => {\n          console.error('Navigation failed:', err);\n          // 如果跳转失败，返回上一页\n          wx.navigateBack();\n        }\n      });\n    }, 1000);\n  },\n\n  /**\n   * 重试按钮\n   */\n  onRetry() {\n    this.setData({\n      loading: true,\n      error: ''\n    });\n    this.onLoadPayDetail(this.data.orderToken);\n  },\n\n  /**\n   * 页面卸载 - 清理定时器\n   */\n  onUnload() {\n    if (this.data.countdownInterval) {\n      clearInterval(this.data.countdownInterval);\n    }\n  },\n\n  /**\n   * 页面隐藏 - 暂停倒计时\n   */\n  onHide() {\n    if (this.data.countdownInterval) {\n      clearInterval(this.data.countdownInterval);\n    }\n  },\n\n  /**\n   * 页面显示 - 恢复倒计时\n   */\n  onShow() {\n    // 如果页面有倒计时且没有错误，重新启动倒计时\n    if (!this.data.error && this.data.countdownSeconds > 0) {\n      this.startCountdown();\n    }\n  }\n});
+// pages/payForFriend/index.js
+
+const app = getApp();
+
+Page({
+  data: {
+    loading: true,
+    error: null,
+    errorDesc: '',
+    paying: false,
+    countdownSeconds: 600, // 10分钟
+    formattedCountdown: '10:00',
+    orderStatus: 0, // 0: 待支付, 1: 支付中, 2: 已完成
+    payDetail: {
+      initiatorName: '王五',
+      initiatorAvatar: 'https://via.placeholder.com/64',
+      message: '帮我付一下奶茶钱，谢谢！',
+      productName: '奶茶饮品',
+      amount: '88.88',
+      orderId: '2024090912345678'
+    },
+    countdownTimer: null
+  },
+
+  onLoad(options) {
+    // 获取订单ID
+    const orderId = options.orderId;
+    if (!orderId) {
+      this.setData({
+        loading: false,
+        error: '订单不存在',
+        errorDesc: '无法找到相关订单信息，请联系发起人重新发起'
+      });
+      return;
+    }
+
+    // 加载订单详情
+    this.loadOrderDetail(orderId);
+    // 启动倒计时
+    this.startCountdown();
+  },
+
+  /**
+   * 加载订单详情
+   */
+  loadOrderDetail(orderId) {
+    // 模拟API调用
+    setTimeout(() => {
+      const payDetail = {
+        initiatorName: '王五',
+        initiatorAvatar: 'https://via.placeholder.com/64',
+        message: '帮我付一下奶茶钱，谢谢！',
+        productName: '奶茶饮品',
+        amount: '88.88',
+        orderId: orderId
+      };
+
+      this.setData({
+        loading: false,
+        payDetail: payDetail
+      });
+    }, 1000);
+  },
+
+  /**
+   * 启动倒计时
+   */
+  startCountdown() {
+    let seconds = 600; // 10分钟
+    
+    const timer = setInterval(() => {
+      seconds--;
+      
+      if (seconds <= 0) {
+        clearInterval(timer);
+        this.setData({
+          countdownSeconds: 0,
+          formattedCountdown: '00:00',
+          orderStatus: 3 // 已过期
+        });
+        wx.showToast({
+          title: '订单已过期',
+          icon: 'none',
+          duration: 2000
+        });
+        return;
+      }
+
+      const minutes = Math.floor(seconds / 60);
+      const secs = seconds % 60;
+      const formatted = `${String(minutes).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+
+      this.setData({
+        countdownSeconds: seconds,
+        formattedCountdown: formatted
+      });
+    }, 1000);
+
+    this.setData({
+      countdownTimer: timer
+    });
+  },
+
+  /**
+   * 处理支付点击
+   */
+  onPaymentClick() {
+    if (this.data.orderStatus !== 0) {
+      wx.showToast({
+        title: '订单状态异常',
+        icon: 'none'
+      });
+      return;
+    }
+
+    this.setData({
+      paying: true,
+      orderStatus: 1
+    });
+
+    // 调用微信支付接口
+    this.requestPayment();
+  },
+
+  /**
+   * 请求支付
+   */
+  requestPayment() {
+    wx.requestPayment({
+      timeStamp: String(Math.floor(Date.now() / 1000)),
+      nonceStr: this.generateNonceStr(),
+      package: 'prepay_id=wx2412312312312312',
+      signType: 'RSA',
+      paySign: 'test_pay_sign',
+      success: (res) => {
+        // 支付成功
+        this.handlePaymentSuccess();
+      },
+      fail: (err) => {
+        // 支付失败
+        this.setData({
+          paying: false,
+          orderStatus: 0
+        });
+        console.error('支付失败:', err);
+        wx.showToast({
+          title: '支付已取消',
+          icon: 'none'
+        });
+      }
+    });
+  },
+
+  /**
+   * 处理支付成功
+   */
+  handlePaymentSuccess() {
+    this.setData({
+      paying: false,
+      orderStatus: 2
+    });
+
+    // 清除倒��时
+    if (this.data.countdownTimer) {
+      clearInterval(this.data.countdownTimer);
+    }
+
+    wx.showToast({
+      title: '支付成功',
+      icon: 'success',
+      duration: 2000
+    });
+
+    // 延迟跳转到成功页面
+    setTimeout(() => {
+      wx.redirectTo({
+        url: '/pages/paySuccess/index',
+        fail: (err) => {
+          console.error('跳转失败:', err);
+        }
+      });
+    }, 2000);
+  },
+
+  /**
+   * 生成随机字符串
+   */
+  generateNonceStr() {
+    return Math.random().toString(36).substring(2, 15) +
+           Math.random().toString(36).substring(2, 15);
+  },
+
+  /**
+   * 重新加载
+   */
+  onRetry() {
+    this.setData({
+      loading: true,
+      error: null,
+      errorDesc: ''
+    });
+
+    // 重新加载订单
+    const orderId = this.data.payDetail.orderId;
+    this.loadOrderDetail(orderId);
+  },
+
+  /**
+   * 页面卸载时清理定时器
+   */
+  onUnload() {
+    if (this.data.countdownTimer) {
+      clearInterval(this.data.countdownTimer);
+    }
+  },
+
+  /**
+   * 分享页面
+   */
+  onShareAppMessage() {
+    return {
+      title: `${this.data.payDetail.initiatorName}请你帮付款`,
+      path: `/pages/payForFriend/index?orderId=${this.data.payDetail.orderId}`,
+      imageUrl: '/assets/images/share-icon.png'
+    };
+  }
+});
